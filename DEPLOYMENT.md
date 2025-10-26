@@ -45,7 +45,7 @@ passwd
 
 # Configurar hostname
 sudo raspi-config
-# System Options > Hostname > gateway-raspberry-pi-001
+# System Options > Hostname > gateway-rpi-001
 
 # Configurar timezone
 sudo timedatectl set-timezone America/Bogota
@@ -58,7 +58,7 @@ sudo reboot
 
 ```bash
 # Conectarse nuevamente
-ssh pi@gateway-raspberry-pi-001.local
+ssh pi@gateway-rpi-001.local
 
 # Instalar herramientas de compilación
 sudo apt install -y \
@@ -200,7 +200,7 @@ cd ~/projects
 # Clonar (o copiar) el código
 git clone <repositorio> env_edge_gateway_rpi
 # O si estás copiando manualmente:
-# scp -r ./env_edge_gateway_rpi pi@gateway-raspberry-pi-001.local:~/projects/
+# scp -r ./env_edge_gateway_rpi pi@gateway-rpi-001.local:~/projects/
 
 cd env_edge_gateway_rpi
 ```
@@ -218,7 +218,7 @@ nano .env
 Configurar:
 
 ```bash
-GATEWAY_ID=gateway-raspberry-pi-001
+GATEWAY_ID=gateway-rpi-001
 DATABASE_URL=sqlite://sensor_data.db
 CLOUD_SERVICE_URL=https://cloud-service.com/api/v1/ingest
 CLOUD_API_KEY=api_key_secreta_aqui
@@ -229,7 +229,7 @@ DATA_RETENTION_DAYS=7
 # Configuración MQTT
 MQTT_BROKER_HOST=localhost
 MQTT_BROKER_PORT=1883
-MQTT_CLIENT_ID=gateway-raspberry-pi-mqtt-001
+MQTT_CLIENT_ID=gateway-rpi-mqtt-001
 
 # Si se configuró autenticación en Mosquitto:
 MQTT_USERNAME=env_edge_gateway_rpi
@@ -269,7 +269,7 @@ cargo build --release --target=aarch64-unknown-linux-gnu
 
 # Copiar binario a Raspberry Pi
 scp target/aarch64-unknown-linux-gnu/release/env_edge_gateway_rpi \
-    pi@gateway-raspberry-pi-001.local:~/projects/env_edge_gateway_rpi/target/release/
+    pi@gateway-rpi-001.local:~/projects/env_edge_gateway_rpi/target/release/
 ```
 
 ## Paso 4: Configurar como Servicio Systemd
@@ -281,6 +281,7 @@ sudo nano /etc/systemd/system/env_edge_gateway_rpi.service
 ```
 
 Contenido:
+
 ```ini
 [Unit]
 Description=IoT Gateway Edge Computing Service
@@ -384,7 +385,7 @@ curl http://localhost:3000/health | jq
 # Deberías ver:
 # {
 #   "status": "ok",
-#   "gateway_id": "gateway-raspberry-pi-001",
+#   "gateway_id": "gateway-rpi-001",
 #   ...
 # }
 
@@ -393,7 +394,7 @@ curl http://localhost:2883/health | jq
 # Deberías ver:
 # {
 #   "status": "ok",
-#   "gateway_id": "gateway-raspberry-pi-001",
+#   "gateway_id": "gateway-rpi-001",
 #   ...
 # }
 ```
@@ -432,13 +433,13 @@ mosquitto_pub -h 192.168.1.XXX \
 
 ```bash
 # Ver logs en tiempo real
-sudo journalctl -u iot-gateway -f
+sudo journalctl -u env_edge_gateway_rpi -f
 
 # Buscar mensajes MQTT
-sudo journalctl -u iot-gateway | grep MQTT
+sudo journalctl -u env_edge_gateway_rpi | grep MQTT
 
 # Buscar procesamiento de datos
-sudo journalctl -u iot-gateway | grep "Dato recibido"
+sudo journalctl -u env_edge_gateway_rpi | grep "Dato recibido"
 ```
 
 ### 6.3 Ejecutar Script de Pruebas

@@ -15,8 +15,8 @@ mod services;
 
 use config::Config;
 use database::Database;
-use services::cloud_sync::CloudSync;
 use services::edge_processor::EdgeProcessor;
+use services::{cloud_sync::CloudSync, mqtt_handler::MqttHandler};
 
 /// Estado compartido de la aplicación
 #[derive(Clone)]
@@ -38,7 +38,7 @@ async fn main() -> anyhow::Result<()> {
         .with(tracing_subscriber::fmt::layer())
         .init();
 
-    tracing::info!("Iniciando IoT Gateway");
+    tracing::info!("Iniciando IoT Gateway Edge Computing");
 
     // Cargar configuración
     let config = Arc::new(Config::load()?);
@@ -61,12 +61,25 @@ async fn main() -> anyhow::Result<()> {
         cloud_sync_clone.start_sync_task(db_clone).await;
     });
 
+    // Inicializar y arrancar MQTT handler
+    tracing::info!("Iniciando MQTT Handler...");
+    let mqtt_handler = MqttHandler::new(
+        config.clone(),
+        db.clone(),
+        edge_processor.clone(),
+        cloud_sync.clone(),
+    )
+    .await?;
+
+    let mqtt_task = mqtt_handler.start().await;
+    tracing::info!("MQTT Handler iniciado");
+
     // Construir estado compartido
     let app_state = AppState {
         db,
         edge_processor,
         cloud_sync,
-        config,
+        config: config.clone(),
     };
 
     // Construir router con todas las rutas
@@ -94,14 +107,35 @@ async fn main() -> anyhow::Result<()> {
         .layer(TraceLayer::new_for_http());
 
     // Obtener dirección de bind
-    let addr = format!("{}:{}", "0.0.0.0", 3000);
+    let http_port = config.mqtt_broker_port + 1000; // Desplazar puerto para HTTP
+    let addr = format!("{}:{}", "0.0.0.0", http_port);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
 
-    tracing::info!("Servidor escuchando en {}", addr);
-    tracing::info!("Listo para recibir datos de sensores IoT");
+    tracing::info!("Servidor HTTP escuchando en {}", addr);
+    tracing::info!(
+        "Broker MQTT: {}:{}",
+        config.mqtt_broker_host,
+        config.mqtt_broker_port
+    );
+    tracing::info!("Topics MQTT:");
+    tracing::info!("   - sensors/+/data (publicar datos individuales)");
+    tracing::info!("   - sensors/+/batch (publicar batches)");
+    tracing::info!("   - sensors/+/processed (respuestas del gateway)");
+    tracing::info!("Sistema listo para recibir datos de sensores IoT");
 
     // Iniciar servidor
-    axum::serve(listener, app).await?;
+    let http_server = axum::serve(listener, app);
+
+    tokio::select! {
+        result = http_server => {
+            if let Err(e) = result {
+                tracing::error!("Error en el servidor HTTP: {}", e);
+            }
+        }
+        _ = mqtt_task => {
+            tracing::error!("El MQTT Handler ha finalizado inesperadamente");
+        }
+    }
 
     Ok(())
 }

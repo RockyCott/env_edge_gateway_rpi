@@ -266,7 +266,7 @@ Health check del gateway.
 ```json
 {
   "status": "ok",
-  "gateway_id": "gateway-raspberry-pi-001",
+  "gateway_id": "gateway-rpi-001",
   "version": "0.1.0",
   "timestamp": "2025-10-22T10:30:00Z",
   "components": {
@@ -389,7 +389,7 @@ CREATE TABLE sensor_readings (
 
 ```json
 {
-  "gateway_id": "gateway-raspberry-pi-001",
+  "gateway_id": "gateway-rpi-001",
   "gateway_version": "0.1.0",
   "sent_at": "2025-10-22T10:30:00Z",
   "batch_stats": {
