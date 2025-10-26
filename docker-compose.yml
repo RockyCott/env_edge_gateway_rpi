@@ -1,0 +1,34 @@
+version: '3.8'
+
+services:
+  env_edge_gateway_rpi:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: env_edge_gateway_rpi
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - GATEWAY_ID=${GATEWAY_ID:-gateway-docker-001}
+      - DATABASE_URL=sqlite:///app/data/sensor_data.db
+      - CLOUD_SERVICE_URL=${CLOUD_SERVICE_URL}
+      - CLOUD_API_KEY=${CLOUD_API_KEY}
+      - CLOUD_SYNC_BATCH_SIZE=${CLOUD_SYNC_BATCH_SIZE:-50}
+      - CLOUD_SYNC_INTERVAL_SECS=${CLOUD_SYNC_INTERVAL_SECS:-300}
+      - DATA_RETENTION_DAYS=${DATA_RETENTION_DAYS:-7}
+      - RUST_LOG=${RUST_LOG:-info}
+    volumes:
+      - ./data:/app/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+    networks:
+      - iot-network
+
+networks:
+  iot-network:
+    driver: bridge

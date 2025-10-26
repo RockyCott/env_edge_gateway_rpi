@@ -436,8 +436,8 @@ Expuestas via `/metrics`:
 
 ```rust
 // Futuro: usar prometheus crate
-gauge!("iot_gateway_pending_sync", pending as f64);
-counter!("iot_gateway_readings_received", 1);
+gauge!("env_edge_gateway_rpi_pending_sync", pending as f64);
+counter!("env_edge_gateway_rpi_readings_received", 1);
 ```
 
 ### Health Checks
@@ -481,7 +481,7 @@ sqlite3 sensor_data.db ".backup backup.db"
 - [x] Core functionality
 - [x] Edge computing algorithms
 - [x] SQLite persistence
-- [] Cloud sync
+- [ ] Cloud sync
 
 ### Fase 2: Producción
 
@@ -499,7 +499,7 @@ sqlite3 sensor_data.db ".backup backup.db"
 
 ### Fase 4: Features Avanzadas
 
-- [ ] MQTT support
+- [x] MQTT support
 - [ ] Edge analytics dashboard
 - [ ] Alertas locales
 - [ ] OTA updates para sensores

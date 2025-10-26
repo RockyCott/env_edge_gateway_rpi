@@ -34,14 +34,21 @@ Gateway edge computing robusto y escalable para nodos de sensores IoT (temperatu
 ┌─────────────┐         ┌──────────────────┐         ┌─────────────┐
 │  ESP32      │         │   Raspberry Pi   │         │    Cloud    │
 │  Sensores   │─────────│   Edge Gateway   │─────────│   Service   │
-│  DHT22/BME  │  HTTP   │  Rust + Axum     │  HTTPS  │  Principal  │
-└─────────────┘         └──────────────────┘         └─────────────┘
-                              │
-                              │
-                        ┌─────┴─────┐
-                        │  SQLite   │
-                        │   Local   │
-                        └───────────┘
+│  DHT22/BME  │  MQTT   │  ┌────────────┐  │  HTTPS  │  Principal  │
+└─────────────┘         │  │ Mosquitto  │  │         └─────────────┘
+                        │  │   Broker   │  │
+                        │  └──────┬─────┘  │
+                        │         │        │
+                        │  ┌──────▼─────┐  │
+                        │  │   Rust     │  │
+                        │  │  Gateway   │  │
+                        │  └──────┬─────┘  │
+                        │         │        │
+                        │  ┌──────▼─────┐  │
+                        │  │  SQLite    │  │
+                        │  │   Local    │  │
+                        │  └────────────┘  │
+                        └──────────────────┘
 ```
 
 ## Inicio Rápido
@@ -54,7 +61,13 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
 # En Raspberry Pi, instalar dependencias del sistema
 sudo apt update
-sudo apt install build-essential pkg-config libssl-dev sqlite3
+sudo apt install build-essential pkg-config libssl-dev sqlite3 git
+
+# Instalar Mosquitto MQTT Broker
+sudo apt install mosquitto mosquitto-clients
+
+# O usar el script incluido
+sudo bash install_mosquitto.sh
 ```
 
 ### Instalación
@@ -94,7 +107,95 @@ cargo run
 
 ## API Endpoints
 
-### Ingesta de Datos
+### Protocolo Principal: MQTT
+
+El sistema utiliza **MQTT** como protocolo principal de comunicación entre sensores y gateway.
+
+## Configuración de Mosquitto MQTT
+
+### Instalación Rápida
+
+```bash
+# Usar el script incluido
+sudo bash install_mosquitto.sh
+
+# O manualmente:
+sudo apt install mosquitto mosquitto-clients
+sudo systemctl enable mosquitto
+sudo systemctl start mosquitto
+```
+
+### Configuración Básica
+
+Archivo: `/etc/mosquitto/conf.d/env_edge_gateway_rpi.conf`
+
+```conf
+listener 1883
+protocol mqtt
+allow_anonymous true  # Cambiar en producción
+persistence true
+persistence_location /var/lib/mosquitto/
+```
+
+Con Autenticación (Producción)
+
+```bash
+# Crear usuario y contraseña
+sudo mosquitto_passwd -c /etc/mosquitto/passwd ienv_edge_gateway_rpi
+
+# Editar configuración
+sudo nano /etc/mosquitto/conf.d/env_edge_gateway_rpi.conf
+```
+
+```conf
+listener 1883
+allow_anonymous false
+password_file /etc/mosquitto/passwd
+```
+
+### Pruebas
+
+```bash
+# Terminal 1: Suscribirse
+mosquitto_sub -h localhost -t 'sensors/#' -v
+
+# Terminal 2: Publicar
+mosquitto_pub -h localhost \
+  -t 'sensors/test/data' \
+  -m '{"temperature": 25.5, "humidity": 65.0}'
+
+# Ver logs
+tail -f /var/log/mosquitto/mosquitto.log
+```
+
+Ver [MQTT.md](./MQTT.md) para documentación completa de MQTT.
+
+#### Topics MQTT
+
+**Publicar datos (ESP32 → Gateway):**
+
+- `sensors/{sensor_id}/data` - Dato individual
+- `sensors/{sensor_id}/batch` - Batch de datos
+
+**Recibir respuestas (Gateway → ESP32):**
+
+- `sensors/{sensor_id}/processed` - Métricas procesadas
+- `sensors/{sensor_id}/batch_processed` - Respuesta de batch
+
+**Ejemplo de publicación:**
+
+```bash
+# Publicar dato individual
+mosquitto_pub -h localhost \
+  -t 'sensors/esp32-001/data' \
+  -m '{"temperature": 25.5, "humidity": 65.0}'
+
+# Suscribirse a respuestas
+mosquitto_sub -h localhost \
+  -t 'sensors/esp32-001/processed' -v
+```
+
+### HTTP API (Monitoreo y Debug)
 
 #### POST /api/v1/sensor/data
 
@@ -156,7 +257,7 @@ Recibe múltiples lecturas en batch.
 }
 ```
 
-### Monitoreo
+El gateway también expone endpoints HTTP para monitoreo:
 
 #### GET /health
 
@@ -337,17 +438,35 @@ Crear `/etc/systemd/system/env_edge_gateway_rpi.service`:
 
 ```ini
 [Unit]
-Description=IoT Gateway Edge Computing
-After=network.target
+Description=IoT Gateway Edge Computing Service
+Documentation=https://github.com/RockyCott/env_edge_gateway_rpi
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
 User=pi
-WorkingDirectory=/home/pi/env_edge_gateway_rpi
-Environment="RUST_LOG=info"
-ExecStart=/home/pi/env_edge_gateway_rpi/target/release/env_edge_gateway_rpi
+Group=pi
+WorkingDirectory=/home/pi/projects/env_edge_gateway_rpi
+EnvironmentFile=/home/pi/projects/env_edge_gateway_rpi/.env
+ExecStart=/home/pi/projects/env_edge_gateway_rpi/target/release/env_edge_gateway_rpi
+
+# Restart policy
 Restart=always
 RestartSec=10
+StartLimitInterval=0
+
+# Logging
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=env_edge_gateway_rpi
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/home/pi/projects/env_edge_gateway_rpi
 
 [Install]
 WantedBy=multi-user.target
@@ -371,7 +490,7 @@ El sistema usa `tracing` para logging estructurado:
 RUST_LOG=debug cargo run
 
 # Solo logs de la app
-RUST_LOG=iot_gateway=debug cargo run
+RUST_LOG=env_edge_gateway_rpi=debug cargo run
 
 # Producción (solo errores importantes)
 RUST_LOG=warn cargo run
@@ -438,7 +557,7 @@ MIT License - Ver archivo LICENSE para más detalles
 
 ## Roadmap
 
-- [ ] MQTT como alternativa a HTTP
+- [x] MQTT como alternativa a HTTP
 - [ ] Machine Learning local para predicción de tendencias
 - [ ] Soporte para más tipos de sensores (CO2, presión, luz)
 - [ ] Dashboard web integrado

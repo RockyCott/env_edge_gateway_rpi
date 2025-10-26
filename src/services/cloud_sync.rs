@@ -32,7 +32,7 @@ impl CloudSync {
             .await?;
 
         if pending_data.is_empty() {
-            tracing::debug!("✓ No hay datos pendientes de sincronización");
+            tracing::debug!("No hay datos pendientes de sincronización");
             return Ok(());
         }
 

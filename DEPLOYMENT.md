@@ -45,7 +45,7 @@ passwd
 
 # Configurar hostname
 sudo raspi-config
-# System Options > Hostname > iot-gateway-001
+# System Options > Hostname > gateway-raspberry-pi-001
 
 # Configurar timezone
 sudo timedatectl set-timezone America/Bogota
@@ -58,7 +58,7 @@ sudo reboot
 
 ```bash
 # Conectarse nuevamente
-ssh pi@iot-gateway-001.local
+ssh pi@gateway-raspberry-pi-001.local
 
 # Instalar herramientas de compilación
 sudo apt install -y \
@@ -72,6 +72,14 @@ sudo apt install -y \
     vim \
     htop
 
+# Instalar Mosquitto MQTT Broker
+sudo apt install -y mosquitto mosquitto-clients
+
+# Verificar instalación de Mosquitto
+mosquitto -h
+mosquitto_pub --help
+
+
 # Instalar Rust
 curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 # Seleccionar: 1) Proceed with installation (default)
@@ -84,9 +92,105 @@ rustc --version
 cargo --version
 ```
 
-## Paso 2: Compilar el Gateway
+## Paso 2: Configurar Mosquitto MQTT
 
-### 2.1 Clonar Repositorio
+### 2.1 Configuración Básica de Mosquitto
+
+```bash
+# Crear archivo de configuración personalizado
+sudo nano /etc/mosquitto/conf.d/env_edge_gateway_rpi.conf
+```
+
+Agregar:
+
+```conf
+# Configuración MQTT para IoT Gateway
+listener 1883
+protocol mqtt
+
+# Logging
+# log_dest file /var/log/mosquitto/mosquitto.log
+log_dest stdout
+log_type error
+log_type warning
+log_type notice
+log_type information
+
+# Persistencia
+persistence true
+# persistence_location /var/lib/mosquitto/
+
+# Límites
+message_size_limit 1048576
+max_keepalive 60
+max_qos 2
+
+# Permitir anónimos (cambiar en producción)
+allow_anonymous true
+```
+
+### 2.2 Configurar Autenticación (Recomendado)
+
+```bash
+# Crear usuario para el gateway
+sudo mosquitto_passwd -c /etc/mosquitto/passwd env_edge_gateway_rpi
+
+# Opcional: Crear usuarios para cada sensor
+sudo mosquitto_passwd /etc/mosquitto/passwd esp32_sensor_001
+sudo mosquitto_passwd /etc/mosquitto/passwd esp32_sensor_002
+```
+
+Actualizar configuración:
+
+```bash
+sudo nano /etc/mosquitto/conf.d/env_edge_gateway_rpi.conf
+```
+
+Cambiar/agregar:
+
+```conf
+# Autenticación
+allow_anonymous false
+password_file /etc/mosquitto/passwd
+```
+
+### 2.3 Habilitar y Probar Mosquitto
+
+```bash
+# Reiniciar Mosquitto
+sudo systemctl restart mosquitto
+
+# Habilitar inicio automático
+sudo systemctl enable mosquitto
+
+# Verificar estado
+sudo systemctl status mosquitto
+
+# Ver logs
+sudo tail -f /var/log/mosquitto/mosquitto.log
+```
+
+### 2.4 Pruebas de Mosquitto
+
+```bash
+# Terminal 1: Suscribirse a todos los topics
+mosquitto_sub -h localhost -t '#' -v
+
+# Si se configuró autenticación:
+mosquitto_sub -h localhost -t '#' -v -u env_edge_gateway_rpi -P password
+
+# Terminal 2: Publicar mensaje de prueba
+mosquitto_pub -h localhost -t 'test/topic' -m 'Hola MQTT'
+
+# Con autenticación:
+mosquitto_pub -h localhost -t 'test/topic' -m 'Hola MQTT' -u env_edge_gateway_rpi -P password
+```
+
+Si todo funciona correctamente, se debería ver el mensaje en Terminal 1.
+
+## Paso 3: Compilar el Gateway
+
+### 3.1 Clonar Repositorio
 
 ```bash
 # Crear directorio para proyectos
@@ -96,12 +200,12 @@ cd ~/projects
 # Clonar (o copiar) el código
 git clone <repositorio> env_edge_gateway_rpi
 # O si estás copiando manualmente:
-# scp -r ./env_edge_gateway_rpi pi@iot-gateway-001.local:~/projects/
+# scp -r ./env_edge_gateway_rpi pi@gateway-raspberry-pi-001.local:~/projects/
 
 cd env_edge_gateway_rpi
 ```
 
-### 2.2 Configurar Variables de Entorno
+### 3.2 Configurar Variables de Entorno
 
 ```bash
 # Copiar archivo de ejemplo
@@ -114,17 +218,27 @@ nano .env
 Configurar:
 
 ```bash
-GATEWAY_ID=iot-gateway-001
-DATABASE_URL=sqlite:///home/pi/projects/env_edge_gateway_rpi/sensor_data.db
+GATEWAY_ID=gateway-raspberry-pi-001
+DATABASE_URL=sqlite://sensor_data.db
 CLOUD_SERVICE_URL=https://cloud-service.com/api/v1/ingest
 CLOUD_API_KEY=api_key_secreta_aqui
 CLOUD_SYNC_BATCH_SIZE=50
 CLOUD_SYNC_INTERVAL_SECS=300
 DATA_RETENTION_DAYS=7
+
+# Configuración MQTT
+MQTT_BROKER_HOST=localhost
+MQTT_BROKER_PORT=1883
+MQTT_CLIENT_ID=gateway-raspberry-pi-mqtt-001
+
+# Si se configuró autenticación en Mosquitto:
+MQTT_USERNAME=env_edge_gateway_rpi
+MQTT_PASSWORD=password_mqtt
+
 RUST_LOG=info
 ```
 
-### 2.3 Compilar el Proyecto
+### 3.3 Compilar el Proyecto
 
 ```bash
 # Compilación optimizada para producción
@@ -136,10 +250,9 @@ cargo build --release
 
 # Verificar tamaño del binario
 ls -lh target/release/env_edge_gateway_rpi
-# Debería ser ~10-15 MB
 ```
 
-### 2.4 Compilación Cruzada (Opcional - Más Rápido)
+### 3.4 Compilación Cruzada (Opcional - Más Rápido)
 
 Si tienes una máquina más potente, puedes compilar allí:
 
@@ -156,12 +269,12 @@ cargo build --release --target=aarch64-unknown-linux-gnu
 
 # Copiar binario a Raspberry Pi
 scp target/aarch64-unknown-linux-gnu/release/env_edge_gateway_rpi \
-    pi@iot-gateway-001.local:~/projects/env_edge_gateway_rpi/target/release/
+    pi@gateway-raspberry-pi-001.local:~/projects/env_edge_gateway_rpi/target/release/
 ```
 
-## Paso 3: Configurar como Servicio Systemd
+## Paso 4: Configurar como Servicio Systemd
 
-### 3.1 Crear Archivo de Servicio
+### 4.1 Crear Archivo de Servicio
 
 ```bash
 sudo nano /etc/systemd/system/env_edge_gateway_rpi.service
@@ -171,7 +284,7 @@ Contenido:
 ```ini
 [Unit]
 Description=IoT Gateway Edge Computing Service
-Documentation=https://github.com/<user>/env_edge_gateway_rpi
+Documentation=https://github.com/RockyCott/env_edge_gateway_rpi
 After=network-online.target
 Wants=network-online.target
 
@@ -204,7 +317,7 @@ ReadWritePaths=/home/pi/projects/env_edge_gateway_rpi
 WantedBy=multi-user.target
 ```
 
-### 3.2 Habilitar y Iniciar Servicio
+### 4.2 Habilitar e Iniciar Servicio
 
 ```bash
 # Recargar configuración de systemd
@@ -225,7 +338,7 @@ sudo systemctl status env_edge_gateway_rpi
 #    Active: active (running)
 ```
 
-### 3.3 Ver Logs
+### 4.3 Ver Logs
 
 ```bash
 # Logs en tiempo real
@@ -241,7 +354,7 @@ sudo journalctl -u env_edge_gateway_rpi --since today
 sudo journalctl -u env_edge_gateway_rpi -p err
 ```
 
-## Paso 4: Configurar Firewall
+## Paso 5: Configurar Firewall
 
 ```bash
 # Instalar UFW (Uncomplicated Firewall)
@@ -260,9 +373,9 @@ sudo ufw enable
 sudo ufw status
 ```
 
-## Paso 5: Probar el Gateway
+## Paso 6: Probar el Gateway
 
-### 5.1 Health Check Local
+### 6.1 Health Check Local (HTTP)
 
 ```bash
 # Desde la Raspberry Pi
@@ -271,19 +384,64 @@ curl http://localhost:3000/health | jq
 # Deberías ver:
 # {
 #   "status": "ok",
-#   "gateway_id": "iot-gateway-001",
+#   "gateway_id": "gateway-raspberry-pi-001",
+#   ...
+# }
+
+curl http://localhost:2883/health | jq
+
+# Deberías ver:
+# {
+#   "status": "ok",
+#   "gateway_id": "gateway-raspberry-pi-001",
 #   ...
 # }
 ```
 
-### 5.2 Probar desde la Red Local
+### 6.2 Probar MQTT
+
+```bash
+# Terminal 1: Suscribirse a topics de sensores
+mosquitto_sub -h localhost -t 'sensors/#' -v -u env_edge_gateway_rpi -P tu_password
+
+# Terminal 2: Publicar dato de prueba
+mosquitto_pub -h localhost \
+  -t 'sensors/test-sensor/data' \
+  -m '{"temperature": 25.5, "humidity": 65.0}' \
+  -u env_edge_gateway_rpi -P password
+
+# Deberías ver en Terminal 1:
+# - El mensaje publicado
+# - La respuesta en sensors/test-sensor/processed
+```
+
+### 6.3 Probar desde la Red Local
 
 ```bash
 # Desde otra máquina en la misma red
 curl http://192.168.1.XXX:3000/health | jq
+
+# Publicar via MQTT
+mosquitto_pub -h 192.168.1.XXX \
+  -t 'sensors/remote-test/data' \
+  -m '{"temperature": 24.0, "humidity": 70.0}' \
+  -u env_edge_gateway_rpi -P tu_password
 ```
 
-### 5.3 Ejecutar Script de Pruebas
+### 6.3 Verificar Logs del Gateway
+
+```bash
+# Ver logs en tiempo real
+sudo journalctl -u iot-gateway -f
+
+# Buscar mensajes MQTT
+sudo journalctl -u iot-gateway | grep MQTT
+
+# Buscar procesamiento de datos
+sudo journalctl -u iot-gateway | grep "Dato recibido"
+```
+
+### 6.3 Ejecutar Script de Pruebas
 
 ```bash
 # Hacer ejecutable
@@ -296,9 +454,9 @@ chmod +x test_gateway.sh
 ./test_gateway.sh http://192.168.1.XXX:3000
 ```
 
-## Paso 6: Monitoreo y Mantenimiento
+## Paso 7: Monitoreo y Mantenimiento
 
-### 6.1 Configurar Logrotate
+### 7.1 Configurar Logrotate
 
 ```bash
 sudo nano /etc/logrotate.d/env_edge_gateway_rpi
@@ -318,7 +476,7 @@ Contenido:
 }
 ```
 
-### 6.2 Script de Backup Automático
+### 7.2 Script de Backup Automático
 
 ```bash
 nano ~/backup_gateway.sh
@@ -356,7 +514,7 @@ crontab -e
 0 2 * * * /home/pi/backup_gateway.sh >> /home/pi/backup.log 2>&1
 ```
 
-### 6.3 Monitoreo de Recursos
+### 7.3 Monitoreo de Recursos
 
 ```bash
 # Instalar herramientas
@@ -372,7 +530,7 @@ sudo iotop
 sudo nethogs
 ```
 
-### 6.4 Alertas por Email (Opcional)
+### 7.4 Alertas por Email (Opcional)
 
 ```bash
 # Instalar mailutils
@@ -399,9 +557,9 @@ crontab -e
 */5 * * * * /home/pi/check_gateway.sh
 ```
 
-## Paso 7: Actualizaciones
+## Paso 8: Actualizaciones
 
-### 7.1 Actualizar el Gateway
+### 8.1 Actualizar el Gateway
 
 ```bash
 # Detener servicio
@@ -422,7 +580,7 @@ sudo systemctl status env_edge_gateway_rpi
 curl http://localhost:3000/health
 ```
 
-### 7.2 Actualización Automática del Sistema
+### 8.2 Actualización Automática del Sistema
 
 ```bash
 # Instalar unattended-upgrades
@@ -513,7 +671,7 @@ sqlite3 sensor_data.db "VACUUM;"
 sudo journalctl --vacuum-time=7d
 ```
 
-## 🔒 Seguridad en Producción
+## Seguridad en Producción
 
 ### 1. Cambiar Puerto por Defecto
 
@@ -617,7 +775,7 @@ sudo systemctl disable avahi-daemon
 
 Si encuentras problemas:
 
-1. Revisar logs: `sudo journalctl -u iot-gateway -f`
+1. Revisar logs: `sudo journalctl -u env_edge_gateway_rpi -f`
 2. Verificar health: `curl http://localhost:3000/health`
 3. Revisar issues en el repositorio
 4. Contactar al equipo de desarrollo

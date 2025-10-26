@@ -24,6 +24,10 @@ sqlx = { version = "0.8.6", features = ["runtime-tokio-rustls", "sqlite"] }
 # HTTP Client for sending to main service
 reqwest = { version = "0.12.24", features = ["json"] }
 
+# MQTT Client
+rumqttc = "0.25.0"
+tokio-stream = "0.1.17"
+
 # Utils
 chrono = { version = "0.4.42", features = ["serde"] }
 uuid = { version = "1.18.1", features = ["v4", "serde"] }
