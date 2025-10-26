@@ -1,0 +1,72 @@
+# ==========================================
+# Rust / Cargo
+# ==========================================
+/target/                       # Archivos compilados de Rust
+/target
+**/*.rs.bk                     # Backups generados por rustfmt o editores
+Cargo.lock                     # Si este proyecto es una librería, ignóralo; si es binario, remueve esta línea
+
+# ==========================================
+# Archivos de configuración local
+# ==========================================
+.env                           # Variables de entorno locales
+*.env.*                        # Archivos .env.* (por ejemplo .env.local)
+config/local.toml              # Configuración local opcional
+
+# ==========================================
+# Archivos generados / persistencia local
+# ==========================================
+sensor_data.db                 # Base de datos SQLite local
+*.sqlite
+*.db-journal                   # Journal de SQLite
+*.log                          # Logs del servidor
+/tmp/
+*.pid
+
+# ==========================================
+# Archivos temporales y caché
+# ==========================================
+*.tmp
+*.swp
+*.swo
+*~
+.cache/
+logs/
+.DS_Store
+Thumbs.db
+
+# ==========================================
+# IDEs y herramientas de desarrollo
+# ==========================================
+# VS Code
+.vscode/
+# IntelliJ / CLion / RustRover
+.idea/
+# Otros
+*.iml
+*.bak
+*.orig
+
+# ==========================================
+# Compilación cruzada o despliegue en Raspberry Pi
+# ==========================================
+# Binarios compilados para ARM
+iot-gateway                    # Ejecutable compilado (cargo build --release)
+iot-gateway-arm*
+release/
+build/
+cross/
+
+# ==========================================
+# Documentación o metadata temporal
+# ==========================================
+/docs/_build/
+/doc/
+/book/
+
+# ==========================================
+# Cobertura de tests o reportes
+# ==========================================
+/coverage/
+*.profraw
+*.profdata
