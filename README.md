@@ -63,7 +63,7 @@ sudo apt install build-essential pkg-config libssl-dev sqlite3
 
 ```bash
 git clone <http-repositorio>
-cd iot-gateway
+cd env_edge_gateway_rpi
 
 # Copiar configuración de ejemplo
 cp .env.example .env
@@ -89,7 +89,7 @@ cargo build --release
 cargo run
 
 # Producción
-./target/release/iot-gateway
+./target/release/env_edge_gateway_rpi
 ```
 
 ## API Endpoints
@@ -333,7 +333,7 @@ cargo build --release --target=armv7-unknown-linux-gnueabihf
 
 ### Systemd Service
 
-Crear `/etc/systemd/system/iot-gateway.service`:
+Crear `/etc/systemd/system/env_edge_gateway_rpi.service`:
 
 ```ini
 [Unit]
@@ -343,9 +343,9 @@ After=network.target
 [Service]
 Type=simple
 User=pi
-WorkingDirectory=/home/pi/iot-gateway
+WorkingDirectory=/home/pi/env_edge_gateway_rpi
 Environment="RUST_LOG=info"
-ExecStart=/home/pi/iot-gateway/target/release/iot-gateway
+ExecStart=/home/pi/env_edge_gateway_rpi/target/release/env_edge_gateway_rpi
 Restart=always
 RestartSec=10
 
@@ -357,9 +357,9 @@ Activar:
 
 ```bash
 sudo systemctl daemon-reload
-sudo systemctl enable iot-gateway
-sudo systemctl start iot-gateway
-sudo systemctl status iot-gateway
+sudo systemctl enable env_edge_gateway_rpi
+sudo systemctl start env_edge_gateway_rpi
+sudo systemctl status env_edge_gateway_rpi
 ```
 
 ## Logging
@@ -383,7 +383,7 @@ RUST_LOG=warn cargo run
 
 - Verificar `CLOUD_SERVICE_URL` en `.env`
 - Verificar `CLOUD_API_KEY`
-- Revisar logs: `journalctl -u iot-gateway -f`
+- Revisar logs: `journalctl -u env_edge_gateway_rpi -f`
 
 ### Los sensores no envían datos
 
@@ -399,7 +399,7 @@ RUST_LOG=warn cargo run
 ## Estructura del Proyecto
 
 ```text
-iot-gateway/
+env_edge_gateway_rpi/
 ├── Cargo.toml              # Dependencias del proyecto
 ├── .env.example            # Configuración de ejemplo
 ├── README.md               # Este archivo
