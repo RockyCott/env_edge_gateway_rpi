@@ -1,31 +1,43 @@
 # ==========================================
 # Rust / Cargo
 # ==========================================
-/target/                       # Archivos compilados de Rust
+
+# Archivos compilados de Rust
+/target/
 /target
-**/*.rs.bk                     # Backups generados por rustfmt o editores
-Cargo.lock                     # Si este proyecto es una librería, ignóralo; si es binario, remueve esta línea
+# Backups generados por rustfmt o editores
+**/*.rs.bk
+# Para proyectos de una librería, ignórarlo; si es binario, remover esta línea
+Cargo.lock
 
 # ==========================================
 # Archivos de configuración local
 # ==========================================
-.env                           # Variables de entorno locales
-*.env.*                        # Archivos .env.* (por ejemplo .env.local)
-config/local.toml              # Configuración local opcional
+
+.env
+# Archivos .env.* (por ejemplo .env.local)
+*.env.*
+# Configuración local opcional
+config/local.toml
 
 # ==========================================
 # Archivos generados / persistencia local
 # ==========================================
-sensor_data.db                 # Base de datos SQLite local
+
+# Base de datos SQLite local
+sensor_data.db
 *.sqlite
-*.db-journal                   # Journal de SQLite
-*.log                          # Logs del servidor
+# Journal de SQLite
+*.db-journal
+# Logs del servidor
+*.log
 /tmp/
 *.pid
 
 # ==========================================
 # Archivos temporales y caché
 # ==========================================
+
 *.tmp
 *.swp
 *.swo
@@ -50,9 +62,11 @@ Thumbs.db
 # ==========================================
 # Compilación cruzada o despliegue en Raspberry Pi
 # ==========================================
+
 # Binarios compilados para ARM
-iot-gateway                    # Ejecutable compilado (cargo build --release)
-iot-gateway-arm*
+# Ejecutable compilado (cargo build --release)
+env-edge-gateway-rpi
+env-edge-gateway-rpi-arm*
 release/
 build/
 cross/
@@ -60,6 +74,7 @@ cross/
 # ==========================================
 # Documentación o metadata temporal
 # ==========================================
+
 /docs/_build/
 /doc/
 /book/
@@ -67,6 +82,7 @@ cross/
 # ==========================================
 # Cobertura de tests o reportes
 # ==========================================
+
 /coverage/
 *.profraw
 *.profdata
