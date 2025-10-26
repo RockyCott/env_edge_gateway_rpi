@@ -427,7 +427,7 @@ iot-gateway/
 Las contribuciones son bienvenidas. Por favor:
 
 1. Fork el repositorio
-2. Crea una branch para tu feature
+2. Crea una branch para la feature
 3. Commit tus cambios
 4. Push a la branch
 5. Abre un Pull Request
