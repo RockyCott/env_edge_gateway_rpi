@@ -107,7 +107,7 @@ async fn main() -> anyhow::Result<()> {
         .layer(TraceLayer::new_for_http());
 
     // Obtener dirección de bind
-    let http_port = config.mqtt_broker_port + 1000; // Desplazar puerto para HTTP
+    let http_port = 3000;
     let addr = format!("{}:{}", "0.0.0.0", http_port);
     let listener = tokio::net::TcpListener::bind(&addr).await?;
 
