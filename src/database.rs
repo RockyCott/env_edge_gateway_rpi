@@ -12,10 +12,32 @@ pub struct Database {
 impl Database {
     /// Crea una nueva conexión a la base de datos SQLite
     pub async fn new(database_url: &str) -> anyhow::Result<Self> {
+        // --- Crear carpeta y archivo si no existen ---
+        if let Some(path_str) = database_url.strip_prefix("sqlite://") {
+            let db_path = std::path::Path::new(path_str);
+
+            // Crear carpeta si no existe
+            if let Some(parent) = db_path.parent() {
+                if !parent.exists() {
+                    std::fs::create_dir_all(parent)?;
+                    tracing::info!("Carpeta creada para base de datos: {:?}", parent);
+                }
+            }
+
+            // Crear archivo si no existe
+            if !db_path.exists() {
+                std::fs::File::create(db_path)?;
+                tracing::info!("Archivo SQLite creado: {:?}", db_path);
+            }
+        }
+
+        // --- Crear el pool de conexiones ---
         let pool = SqlitePoolOptions::new()
             .max_connections(5)
             .connect(database_url)
             .await?;
+
+        tracing::info!("Conexión SQLite inicializada en {}", database_url);
 
         Ok(Self { pool })
     }
