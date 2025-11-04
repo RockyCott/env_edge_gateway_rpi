@@ -3,9 +3,9 @@ use serde_json::{Value, json};
 use validator::Validate;
 
 use crate::{
-    AppState,
     error::AppError,
     models::{SensorDataBatch, SensorDataInput},
+    startup::state::AppState,
 };
 
 /// Handler para recibir datos individuales de un sensor

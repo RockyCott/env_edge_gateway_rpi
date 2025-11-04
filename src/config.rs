@@ -31,6 +31,8 @@ pub struct Config {
     pub mqtt_client_id: String,
     pub mqtt_username: Option<String>,
     pub mqtt_password: Option<String>,
+
+    pub http_port: Option<u16>,
 }
 
 impl Config {
@@ -78,6 +80,8 @@ impl Config {
             
             mqtt_username: env::var("MQTT_USERNAME").ok(),
             mqtt_password: env::var("MQTT_PASSWORD").ok(),
+
+            http_port: env::var("HTTP_PORT").ok().and_then(|port| port.parse().ok()),
         };
 
         Ok(config)
