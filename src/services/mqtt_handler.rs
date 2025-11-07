@@ -1,4 +1,4 @@
-use rumqttc::{AsyncClient, Event, MqttOptions, Packet, QoS};
+use rumqttc::{AsyncClient, Event, EventLoop, MqttOptions, Packet, QoS};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::task::JoinHandle;
@@ -9,9 +9,9 @@ use crate::{
 };
 
 /// Handler MQTT para recibir datos de sensores ESP32
-/// Los sensores publican en topics: sensors/{sensor_id}/data
 pub struct MqttHandler {
     client: AsyncClient,
+    eventloop: EventLoop,
     config: Arc<Config>,
     db: Database,
     edge_processor: Arc<EdgeProcessor>,
@@ -26,7 +26,6 @@ impl MqttHandler {
         edge_processor: Arc<EdgeProcessor>,
         cloud_sync: Arc<CloudSync>,
     ) -> anyhow::Result<Self> {
-        // Configurar opciones MQTT
         let mut mqttoptions = MqttOptions::new(
             &config.mqtt_client_id,
             &config.mqtt_broker_host,
@@ -36,13 +35,11 @@ impl MqttHandler {
         mqttoptions.set_keep_alive(Duration::from_secs(60));
         mqttoptions.set_max_packet_size(1024 * 1024, 1024 * 1024); // 1MB
 
-        // Autenticación si está configurada
         if let (Some(username), Some(password)) = (&config.mqtt_username, &config.mqtt_password) {
             mqttoptions.set_credentials(username, password);
         }
 
-        // Crear cliente async
-        let (client, mut eventloop) = AsyncClient::new(mqttoptions, 100);
+        let (client, eventloop) = AsyncClient::new(mqttoptions, 100);
 
         tracing::info!(
             broker = %config.mqtt_broker_host,
@@ -50,9 +47,7 @@ impl MqttHandler {
             "Conectando a broker MQTT"
         );
 
-        // Suscribirse a topics
-        // sensors/+/data - Datos individuales de cualquier sensor
-        // sensors/+/batch - Batches de datos
+        // Suscripciones iniciales
         client.subscribe("sensors/+/data", QoS::AtLeastOnce).await?;
         client
             .subscribe("sensors/+/batch", QoS::AtLeastOnce)
@@ -62,6 +57,7 @@ impl MqttHandler {
 
         Ok(Self {
             client,
+            eventloop,
             config,
             db,
             edge_processor,
@@ -70,43 +66,8 @@ impl MqttHandler {
     }
 
     /// Inicia el loop de procesamiento de mensajes MQTT
-    pub async fn start(self) -> JoinHandle<()> {
-        let (client, mut eventloop) = {
-            let mut mqttoptions = MqttOptions::new(
-                &self.config.mqtt_client_id,
-                &self.config.mqtt_broker_host,
-                self.config.mqtt_broker_port,
-            );
-
-            mqttoptions.set_keep_alive(Duration::from_secs(60));
-            mqttoptions.set_max_packet_size(1024 * 1024, 1024 * 1024);
-
-            if let (Some(username), Some(password)) =
-                (&self.config.mqtt_username, &self.config.mqtt_password)
-            {
-                mqttoptions.set_credentials(username, password);
-            }
-
-            AsyncClient::new(mqttoptions, 100)
-        };
-
-        // Suscribirse
-        let subscribe_client = client.clone();
-        tokio::spawn(async move {
-            if let Err(e) = subscribe_client
-                .subscribe("sensors/+/data", QoS::AtLeastOnce)
-                .await
-            {
-                tracing::error!("Error suscribiéndose a sensors/+/data: {}", e);
-            }
-            if let Err(e) = subscribe_client
-                .subscribe("sensors/+/batch", QoS::AtLeastOnce)
-                .await
-            {
-                tracing::error!("Error suscribiéndose a sensors/+/batch: {}", e);
-            }
-        });
-
+    pub async fn start(mut self) -> JoinHandle<()> {
+        let client = self.client.clone();
         let db = self.db.clone();
         let edge_processor = self.edge_processor.clone();
         let cloud_sync = self.cloud_sync.clone();
@@ -116,7 +77,7 @@ impl MqttHandler {
             tracing::info!("MQTT Handler iniciado, escuchando mensajes...");
 
             loop {
-                match eventloop.poll().await {
+                match self.eventloop.poll().await {
                     Ok(notification) => {
                         if let Event::Incoming(Packet::Publish(publish)) = notification {
                             let topic = publish.topic.clone();
@@ -128,7 +89,6 @@ impl MqttHandler {
                                 "Mensaje MQTT recibido"
                             );
 
-                            // Procesar mensaje
                             if let Err(e) = Self::process_message(
                                 &topic,
                                 &payload,
@@ -167,41 +127,37 @@ impl MqttHandler {
         config: Arc<Config>,
         client: AsyncClient,
     ) -> anyhow::Result<()> {
-        // Parsear topic para obtener sensor_id y tipo
         let parts: Vec<&str> = topic.split('/').collect();
-
         if parts.len() < 3 {
             tracing::warn!("Topic inválido: {}", topic);
             return Ok(());
         }
 
         let sensor_id = parts[1];
-        let message_type = parts[2]; // "data" o "batch"
+        let message_type = parts[2];
 
         match message_type {
             "data" => {
-                // Procesar dato individual
                 Self::process_single_data(
                     sensor_id,
                     payload,
-                    db.clone(),
-                    edge_processor.clone(),
-                    cloud_sync.clone(),
-                    config.clone(),
-                    client.clone(),
+                    db,
+                    edge_processor,
+                    cloud_sync,
+                    config,
+                    client,
                 )
                 .await?;
             }
             "batch" => {
-                // Procesar batch
                 Self::process_batch_data(
                     sensor_id,
                     payload,
-                    db.clone(),
-                    edge_processor.clone(),
-                    cloud_sync.clone(),
-                    config.clone(),
-                    client.clone(),
+                    db,
+                    edge_processor,
+                    cloud_sync,
+                    config,
+                    client,
                 )
                 .await?;
             }
@@ -213,7 +169,6 @@ impl MqttHandler {
         Ok(())
     }
 
-    /// Procesa un dato individual
     async fn process_single_data(
         sensor_id: &str,
         payload: &[u8],
@@ -223,10 +178,7 @@ impl MqttHandler {
         config: Arc<Config>,
         client: AsyncClient,
     ) -> anyhow::Result<()> {
-        // Deserializar payload JSON
         let mut input: SensorDataInput = serde_json::from_slice(payload)?;
-
-        // Asegurar que el sensor_id del payload coincida con el topic
         input.sensor_id = sensor_id.to_string();
 
         tracing::info!(
@@ -236,20 +188,14 @@ impl MqttHandler {
             "Dato recibido vía MQTT"
         );
 
-        // Procesar con edge computing
         let processed = edge_processor.process_reading(input).await;
 
         if processed.computed.is_anomaly {
-            tracing::warn!(
-                sensor_id = %sensor_id,
-                "Anomalía detectada vía MQTT"
-            );
+            tracing::warn!(sensor_id = %sensor_id, "Anomalía detectada vía MQTT");
         }
 
-        // Almacenar en base de datos
         db.insert_reading(&processed).await?;
 
-        // Publicar respuesta con métricas procesadas
         let response_topic = format!("sensors/{}/processed", sensor_id);
         let response_payload = serde_json::json!({
             "id": processed.id,
@@ -274,7 +220,6 @@ impl MqttHandler {
                 .await;
         }
 
-        // Verificar si es necesario sincronizar
         let pending_count = db.count_pending_sync().await?;
         if pending_count >= config.cloud_sync_batch_size as i64 {
             tracing::info!("Iniciando sincronización con cloud");
@@ -290,7 +235,6 @@ impl MqttHandler {
         Ok(())
     }
 
-    /// Procesa un batch de datos
     async fn process_batch_data(
         sensor_id: &str,
         payload: &[u8],
@@ -300,15 +244,12 @@ impl MqttHandler {
         config: Arc<Config>,
         client: AsyncClient,
     ) -> anyhow::Result<()> {
-        // Deserializar batch
         #[derive(serde::Deserialize)]
         struct BatchPayload {
             readings: Vec<SensorDataInput>,
         }
 
         let mut batch: BatchPayload = serde_json::from_slice(payload)?;
-
-        // Asegurar sensor_id en todas las lecturas
         for reading in &mut batch.readings {
             reading.sensor_id = sensor_id.to_string();
         }
@@ -320,27 +261,18 @@ impl MqttHandler {
             "Batch recibido vía MQTT"
         );
 
-        // Procesar batch
         let processed_batch = edge_processor.process_batch(batch.readings).await;
 
-        // Estadísticas
-        let mut anomalies = 0;
-        let mut total_quality: u32 = 0;
+        let anomalies = processed_batch
+            .iter()
+            .filter(|d| d.computed.is_anomaly)
+            .count();
+        let avg_quality = processed_batch
+            .iter()
+            .map(|d| d.quality.score as f32)
+            .sum::<f32>()
+            / batch_size.max(1) as f32;
 
-        for data in &processed_batch {
-            if data.computed.is_anomaly {
-                anomalies += 1;
-            }
-            total_quality += data.quality.score as u32;
-        }
-
-        let avg_quality = if batch_size > 0 {
-            total_quality as f32 / batch_size as f32
-        } else {
-            0.0
-        };
-
-        // Almacenar batch
         db.insert_batch(&processed_batch).await?;
 
         tracing::info!(
@@ -351,7 +283,6 @@ impl MqttHandler {
             "Batch procesado vía MQTT"
         );
 
-        // Publicar respuesta
         let response_topic = format!("sensors/{}/batch_processed", sensor_id);
         let response_payload = serde_json::json!({
             "status": "success",
@@ -371,7 +302,6 @@ impl MqttHandler {
                 .await;
         }
 
-        // Verificar sincronización
         let pending_count = db.count_pending_sync().await?;
         if pending_count >= config.cloud_sync_batch_size as i64 {
             let cloud_sync_clone = cloud_sync.clone();
