@@ -1,6 +1,7 @@
 use crate::config::Config;
 use crate::models::*;
 use chrono::Utc;
+use std::collections::HashMap;
 use std::sync::Arc;
 use uuid::Uuid;
 
@@ -19,26 +20,37 @@ impl EdgeProcessor {
     pub async fn process_reading(&self, input: SensorDataInput) -> ProcessedSensorData {
         let gateway_timestamp = Utc::now();
 
+        // Extraer temperatura y humedad si existen en las métricas
+        let temp_metric = input
+            .metrics
+            .iter()
+            .find(|m| m.measurement.to_lowercase() == "temperature");
+        let hum_metric = input.metrics.iter().find(|m| {
+            m.measurement.to_lowercase() == "humidity" || m.measurement.to_lowercase() == "humedad"
+        });
+
         // Calcular métricas derivadas
-        let computed = self.compute_metrics(&input);
+        let computed = self.compute_metrics(&input.metrics, temp_metric, hum_metric);
 
         // Evaluar calidad de los datos
         let quality = self.assess_quality(&input, &computed);
 
         // Construir metadatos
-        let metadata = SensorMetadata {
-            battery_level: input.battery_level,
-            rssi: input.rssi,
-            firmware_version: None,
+        let metadata = ProcessedMetadata {
+            metrics_count: input.metrics.len(),
+            measurement_types: input
+                .metrics
+                .iter()
+                .map(|m| m.measurement.clone())
+                .collect(),
+            should_requeue: input.header.should_requeue,
         };
 
         ProcessedSensorData {
             id: Uuid::new_v4(),
-            sensor_id: input.sensor_id,
-            temperature: input.temperature,
-            humidity: input.humidity,
+            header: input.header,
+            metrics: input.metrics,
             gateway_timestamp,
-            sensor_timestamp: input.timestamp,
             computed,
             quality,
             metadata,
@@ -46,32 +58,40 @@ impl EdgeProcessor {
     }
 
     /// Calcula métricas derivadas usando algoritmos de edge computing
-    fn compute_metrics(&self, input: &SensorDataInput) -> ComputedMetrics {
-        // Calcular Heat Index (índice de calor)
-        // Fórmula simplificada de NOAA
-        let heat_index = self.calculate_heat_index(input.temperature, input.humidity);
+    fn compute_metrics(
+        &self,
+        metrics: &[SensorMetric],
+        temp_metric: Option<&SensorMetric>,
+        hum_metric: Option<&SensorMetric>,
+    ) -> ComputedMetrics {
+        let mut stats = HashMap::new();
 
-        // Calcular Dew Point (punto de rocío)
-        // Fórmula de Magnus-Tetens
-        let dew_point = self.calculate_dew_point(input.temperature, input.humidity);
+        // Calcular Heat Index y Dew Point si hay temperatura y humedad
+        let (heat_index, dew_point, comfort_level) =
+            if let (Some(temp), Some(hum)) = (temp_metric, hum_metric) {
+                let hi = self.calculate_heat_index(temp.value, hum.value);
+                let dp = self.calculate_dew_point(temp.value, hum.value);
+                let cl = self.calculate_comfort_level(temp.value, hum.value);
+                (Some(hi), Some(dp), Some(cl))
+            } else {
+                (None, None, None)
+            };
 
-        // Calcular nivel de confort (basado en temp y humedad)
-        let comfort_level = self.calculate_comfort_level(input.temperature, input.humidity);
+        // Calcular estadísticas básicas para cada métrica
+        for metric in metrics {
+            // Aquí podrías agregar más estadísticas si tienes histórico
+            stats.insert(format!("{}_current", metric.measurement), metric.value);
+        }
 
-        // Detectar anomalías (simplificado - en producción usaría ML local)
-        let is_anomaly = self.detect_anomaly(input);
-
-        // Calcular tendencias (requeriría histórico - simplificado aquí)
-        let temperature_trend = self.calculate_trend(input.temperature);
-        let humidity_trend = self.calculate_trend(input.humidity);
+        // Detectar anomalías
+        let is_anomaly = self.detect_anomaly(metrics, temp_metric, hum_metric);
 
         ComputedMetrics {
             heat_index,
             dew_point,
             comfort_level,
             is_anomaly,
-            temperature_trend,
-            humidity_trend,
+            stats,
         }
     }
 
@@ -141,23 +161,55 @@ impl EdgeProcessor {
     }
 
     /// Detecta anomalías en las lecturas
-    /// Versión simplificada - en producción usaría modelos más sofisticados
-    fn detect_anomaly(&self, input: &SensorDataInput) -> bool {
-        // Rangos extremos que indican posible anomalía
-        let temp_anomaly = input.temperature < -10.0 || input.temperature > 50.0;
-        let humidity_anomaly = input.humidity < 10.0 || input.humidity > 95.0;
+    fn detect_anomaly(
+        &self,
+        metrics: &[SensorMetric],
+        temp_metric: Option<&SensorMetric>,
+        hum_metric: Option<&SensorMetric>,
+    ) -> bool {
+        // Rangos extremos para temperatura
+        if let Some(temp) = temp_metric {
+            if temp.value < -10.0 || temp.value > 50.0 {
+                return true;
+            }
+        }
 
-        // Cambios muy bruscos (requeriría lectura anterior - simplificado)
-        let rapid_change = false; // Placeholder para lógica más compleja
+        // Rangos extremos para humedad
+        if let Some(hum) = hum_metric {
+            if hum.value < 10.0 || hum.value > 95.0 {
+                return true;
+            }
+        }
 
-        temp_anomaly || humidity_anomaly || rapid_change
-    }
+        // Detectar valores extremos en cualquier métrica
+        for metric in metrics {
+            // Valores muy negativos o muy altos podrían ser anomalías
+            if metric.value.is_nan() || metric.value.is_infinite() {
+                return true;
+            }
 
-    /// Calcula tendencia simple (requeriría histórico real)
-    fn calculate_trend(&self, value: f32) -> i8 {
-        // Simplificado: en producción compararía con lecturas anteriores
-        // Por ahora retorna 0 (estable)
-        0
+            // Rangos específicos por tipo de medición
+            match metric.measurement.to_lowercase().as_str() {
+                "distance" | "distancia" => {
+                    if metric.value < 0.0 || metric.value > 10000.0 {
+                        return true;
+                    }
+                }
+                "voltage" | "voltaje" => {
+                    if metric.value < 0.0 || metric.value > 50.0 {
+                        return true;
+                    }
+                }
+                _ => {
+                    // Detección genérica
+                    if metric.value.abs() > 10000.0 {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        false
     }
 
     /// Evalúa la calidad de los datos recibidos
@@ -166,20 +218,10 @@ impl EdgeProcessor {
         let mut issues = Vec::new();
         let corrected = false;
 
-        // Verificar batería baja
-        if let Some(battery) = input.battery_level {
-            if battery < 20.0 {
-                score = score.saturating_sub(10);
-                issues.push(format!("Batería baja: {:.1}%", battery));
-            }
-        }
-
-        // Verificar señal WiFi débil
-        if let Some(rssi) = input.rssi {
-            if rssi < -80 {
-                score = score.saturating_sub(15);
-                issues.push(format!("Señal WiFi débil: {} dBm", rssi));
-            }
+        // Verificar que haya métricas
+        if input.metrics.is_empty() {
+            score = score.saturating_sub(50);
+            issues.push("No hay métricas en el mensaje".to_string());
         }
 
         // Verificar anomalías
@@ -188,10 +230,22 @@ impl EdgeProcessor {
             issues.push("Lectura anómala detectada".to_string());
         }
 
-        // Verificar valores en rangos razonables
-        if input.temperature < -40.0 || input.temperature > 85.0 {
-            score = score.saturating_sub(30);
-            issues.push("Temperatura fuera de rango normal".to_string());
+        // Verificar valores NaN o infinitos
+        for metric in &input.metrics {
+            if metric.value.is_nan() {
+                score = score.saturating_sub(30);
+                issues.push(format!("Valor NaN en métrica: {}", metric.measurement));
+            }
+            if metric.value.is_infinite() {
+                score = score.saturating_sub(30);
+                issues.push(format!("Valor infinito en métrica: {}", metric.measurement));
+            }
+        }
+
+        // Verificar location válido
+        if input.header.location.trim().is_empty() {
+            score = score.saturating_sub(10);
+            issues.push("Ubicación vacía o inválida".to_string());
         }
 
         DataQuality {
@@ -201,7 +255,7 @@ impl EdgeProcessor {
         }
     }
 
-    /// Procesa un batch de lecturas en paralelo
+    /// Procesa un batch de lecturas
     pub async fn process_batch(&self, inputs: Vec<SensorDataInput>) -> Vec<ProcessedSensorData> {
         let mut results = Vec::with_capacity(inputs.len());
 

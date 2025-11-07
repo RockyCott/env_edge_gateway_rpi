@@ -4,6 +4,7 @@ use sqlx::sqlite::{SqlitePool, SqlitePoolOptions};
 use uuid::Uuid;
 
 /// Capa de acceso a datos usando SQLite para almacenamiento local en edge
+/// Versión 2: Soporta el nuevo modelo con header y metrics flexibles
 #[derive(Clone)]
 pub struct Database {
     pool: SqlitePool,
@@ -12,64 +13,45 @@ pub struct Database {
 impl Database {
     /// Crea una nueva conexión a la base de datos SQLite
     pub async fn new(database_url: &str) -> anyhow::Result<Self> {
-        // --- Crear carpeta y archivo si no existen ---
-        if let Some(path_str) = database_url.strip_prefix("sqlite://") {
-            let db_path = std::path::Path::new(path_str);
-
-            // Crear carpeta si no existe
-            if let Some(parent) = db_path.parent() {
-                if !parent.exists() {
-                    std::fs::create_dir_all(parent)?;
-                    tracing::info!("Carpeta creada para base de datos: {:?}", parent);
-                }
-            }
-
-            // Crear archivo si no existe
-            if !db_path.exists() {
-                std::fs::File::create(db_path)?;
-                tracing::info!("Archivo SQLite creado: {:?}", db_path);
-            }
-        }
-
-        // --- Crear el pool de conexiones ---
         let pool = SqlitePoolOptions::new()
             .max_connections(5)
             .connect(database_url)
             .await?;
-
-        tracing::info!("Conexión SQLite inicializada en {}", database_url);
 
         Ok(Self { pool })
     }
 
     /// Ejecuta las migraciones necesarias
     pub async fn migrate(&self) -> anyhow::Result<()> {
+        // Tabla principal de lecturas con estructura flexible
         sqlx::query(
             r#"
             CREATE TABLE IF NOT EXISTS sensor_readings (
                 id TEXT PRIMARY KEY,
-                sensor_id TEXT NOT NULL,
-                temperature REAL NOT NULL,
-                humidity REAL NOT NULL,
-                gateway_timestamp TEXT NOT NULL,
-                sensor_timestamp TEXT,
                 
-                -- Métricas computadas
-                heat_index REAL NOT NULL,
-                dew_point REAL NOT NULL,
-                comfort_level REAL NOT NULL,
-                is_anomaly INTEGER NOT NULL,
-                temperature_trend INTEGER NOT NULL,
-                humidity_trend INTEGER NOT NULL,
+                -- Header information
+                device_id TEXT NOT NULL,
+                location TEXT NOT NULL,
+                topic TEXT NOT NULL,
+                should_requeue INTEGER NOT NULL,
+                
+                -- Timestamps
+                gateway_timestamp TEXT NOT NULL,
+                
+                -- Métricas (almacenadas como JSON para flexibilidad)
+                metrics_json TEXT NOT NULL,
+                
+                -- Métricas computadas (también JSON para flexibilidad)
+                computed_json TEXT NOT NULL,
                 
                 -- Calidad de datos
                 quality_score INTEGER NOT NULL,
                 quality_issues TEXT,
                 quality_corrected INTEGER NOT NULL,
                 
-                -- Metadatos del sensor
-                battery_level REAL,
-                rssi INTEGER,
+                -- Metadatos procesados
+                metrics_count INTEGER NOT NULL,
+                measurement_types TEXT NOT NULL,
                 
                 -- Control de sincronización
                 synced INTEGER NOT NULL DEFAULT 0,
@@ -84,7 +66,11 @@ impl Database {
         .await?;
 
         // Índices para mejorar performance
-        sqlx::query("CREATE INDEX IF NOT EXISTS idx_sensor_id ON sensor_readings(sensor_id);")
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_device_id ON sensor_readings(device_id);")
+            .execute(&self.pool)
+            .await?;
+
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_location ON sensor_readings(location);")
             .execute(&self.pool)
             .await?;
 
@@ -96,43 +82,44 @@ impl Database {
             .execute(&self.pool)
             .await?;
 
-        tracing::info!("Migraciones de base de datos ejecutadas");
+        sqlx::query("CREATE INDEX IF NOT EXISTS idx_topic ON sensor_readings(topic);")
+            .execute(&self.pool)
+            .await?;
+
+        tracing::info!("Migraciones de base de datos ejecutadas (v2)");
         Ok(())
     }
 
     /// Inserta una lectura procesada
     pub async fn insert_reading(&self, data: &ProcessedSensorData) -> anyhow::Result<()> {
+        let metrics_json = serde_json::to_string(&data.metrics)?;
+        let computed_json = serde_json::to_string(&data.computed)?;
         let quality_issues = serde_json::to_string(&data.quality.issues)?;
+        let measurement_types = serde_json::to_string(&data.metadata.measurement_types)?;
 
         sqlx::query(
             r#"
             INSERT INTO sensor_readings (
-                id, sensor_id, temperature, humidity,
-                gateway_timestamp, sensor_timestamp,
-                heat_index, dew_point, comfort_level,
-                is_anomaly, temperature_trend, humidity_trend,
+                id, device_id, location, topic, should_requeue,
+                gateway_timestamp, metrics_json, computed_json,
                 quality_score, quality_issues, quality_corrected,
-                battery_level, rssi
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                metrics_count, measurement_types
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             "#,
         )
         .bind(data.id.to_string())
-        .bind(&data.sensor_id)
-        .bind(data.temperature)
-        .bind(data.humidity)
+        .bind(&data.header.device_id)
+        .bind(&data.header.location)
+        .bind(&data.header.topic)
+        .bind(data.header.should_requeue as i32)
         .bind(data.gateway_timestamp.to_rfc3339())
-        .bind(data.sensor_timestamp.as_ref().map(|t| t.to_rfc3339()))
-        .bind(data.computed.heat_index)
-        .bind(data.computed.dew_point)
-        .bind(data.computed.comfort_level)
-        .bind(data.computed.is_anomaly as i32)
-        .bind(data.computed.temperature_trend as i32)
-        .bind(data.computed.humidity_trend as i32)
+        .bind(metrics_json)
+        .bind(computed_json)
         .bind(data.quality.score as i32)
         .bind(quality_issues)
         .bind(data.quality.corrected as i32)
-        .bind(data.metadata.battery_level)
-        .bind(data.metadata.rssi)
+        .bind(data.metadata.metrics_count as i32)
+        .bind(measurement_types)
         .execute(&self.pool)
         .await?;
 
@@ -144,37 +131,34 @@ impl Database {
         let mut tx = self.pool.begin().await?;
 
         for reading in data {
+            let metrics_json = serde_json::to_string(&reading.metrics)?;
+            let computed_json = serde_json::to_string(&reading.computed)?;
             let quality_issues = serde_json::to_string(&reading.quality.issues)?;
+            let measurement_types = serde_json::to_string(&reading.metadata.measurement_types)?;
 
             sqlx::query(
                 r#"
                 INSERT INTO sensor_readings (
-                    id, sensor_id, temperature, humidity,
-                    gateway_timestamp, sensor_timestamp,
-                    heat_index, dew_point, comfort_level,
-                    is_anomaly, temperature_trend, humidity_trend,
+                    id, device_id, location, topic, should_requeue,
+                    gateway_timestamp, metrics_json, computed_json,
                     quality_score, quality_issues, quality_corrected,
-                    battery_level, rssi
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    metrics_count, measurement_types
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 "#,
             )
             .bind(reading.id.to_string())
-            .bind(&reading.sensor_id)
-            .bind(reading.temperature)
-            .bind(reading.humidity)
+            .bind(&reading.header.device_id)
+            .bind(&reading.header.location)
+            .bind(&reading.header.topic)
+            .bind(reading.header.should_requeue as i32)
             .bind(reading.gateway_timestamp.to_rfc3339())
-            .bind(reading.sensor_timestamp.as_ref().map(|t| t.to_rfc3339()))
-            .bind(reading.computed.heat_index)
-            .bind(reading.computed.dew_point)
-            .bind(reading.computed.comfort_level)
-            .bind(reading.computed.is_anomaly as i32)
-            .bind(reading.computed.temperature_trend as i32)
-            .bind(reading.computed.humidity_trend as i32)
+            .bind(&metrics_json)
+            .bind(&computed_json)
             .bind(reading.quality.score as i32)
             .bind(&quality_issues)
             .bind(reading.quality.corrected as i32)
-            .bind(reading.metadata.battery_level)
-            .bind(reading.metadata.rssi)
+            .bind(reading.metadata.metrics_count as i32)
+            .bind(&measurement_types)
             .execute(&mut *tx)
             .await?;
         }
@@ -235,21 +219,21 @@ impl Database {
         Ok(())
     }
 
-    /// Obtiene lecturas recientes para un sensor
+    /// Obtiene lecturas recientes para un dispositivo
     pub async fn get_recent_readings(
         &self,
-        sensor_id: &str,
+        device_id: &str,
         limit: usize,
     ) -> anyhow::Result<Vec<ProcessedSensorData>> {
         let rows = sqlx::query(
             r#"
             SELECT * FROM sensor_readings
-            WHERE sensor_id = ?
+            WHERE device_id = ?
             ORDER BY gateway_timestamp DESC
             LIMIT ?
             "#,
         )
-        .bind(sensor_id)
+        .bind(device_id)
         .bind(limit as i64)
         .fetch_all(&self.pool)
         .await?;
@@ -269,36 +253,36 @@ impl Database {
     ) -> anyhow::Result<ProcessedSensorData> {
         use crate::models::*;
 
+        let metrics: Vec<SensorMetric> =
+            serde_json::from_str(&row.get::<String, _>("metrics_json"))?;
+        let computed: ComputedMetrics =
+            serde_json::from_str(&row.get::<String, _>("computed_json"))?;
         let quality_issues: Vec<String> =
             serde_json::from_str(&row.get::<String, _>("quality_issues"))?;
+        let measurement_types: Vec<String> =
+            serde_json::from_str(&row.get::<String, _>("measurement_types"))?;
 
         Ok(ProcessedSensorData {
             id: Uuid::parse_str(&row.get::<String, _>("id"))?,
-            sensor_id: row.get("sensor_id"),
-            temperature: row.get("temperature"),
-            humidity: row.get("humidity"),
-            gateway_timestamp: row.get::<String, _>("gateway_timestamp").parse()?,
-            sensor_timestamp: row
-                .get::<Option<String>, _>("sensor_timestamp")
-                .map(|s| s.parse())
-                .transpose()?,
-            computed: ComputedMetrics {
-                heat_index: row.get("heat_index"),
-                dew_point: row.get("dew_point"),
-                comfort_level: row.get("comfort_level"),
-                is_anomaly: row.get::<i32, _>("is_anomaly") != 0,
-                temperature_trend: row.get::<i32, _>("temperature_trend") as i8,
-                humidity_trend: row.get::<i32, _>("humidity_trend") as i8,
+            header: SensorHeader {
+                user_uuid: None, // No se almacena en DB local
+                device_id: row.get("device_id"),
+                location: row.get("location"),
+                topic: row.get("topic"),
+                should_requeue: row.get::<i32, _>("should_requeue") != 0,
             },
+            metrics,
+            gateway_timestamp: row.get::<String, _>("gateway_timestamp").parse()?,
+            computed,
             quality: DataQuality {
                 score: row.get::<i32, _>("quality_score") as u8,
                 issues: quality_issues,
                 corrected: row.get::<i32, _>("quality_corrected") != 0,
             },
-            metadata: SensorMetadata {
-                battery_level: row.get("battery_level"),
-                rssi: row.get("rssi"),
-                firmware_version: None,
+            metadata: ProcessedMetadata {
+                metrics_count: row.get::<i32, _>("metrics_count") as usize,
+                measurement_types,
+                should_requeue: row.get::<i32, _>("should_requeue") != 0,
             },
         })
     }

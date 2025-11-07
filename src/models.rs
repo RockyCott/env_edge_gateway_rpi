@@ -1,32 +1,54 @@
-use serde::{Deserialize, Serialize};
 use chrono::{DateTime, Utc};
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use uuid::Uuid;
 use validator::Validate;
 
 /// Datos crudos recibidos desde un sensor ESP32
-#[derive(Debug, Deserialize, Serialize, Validate, Clone)]
+#[derive(Debug, Serialize, Deserialize, Validate, Clone)]
 pub struct SensorDataInput {
-    /// ID único del sensor (MAC address o ID configurado)
+    /// Header con información del dispositivo
+    #[validate(nested)]
+    pub header: SensorHeader,
+
+    /// Métricas del sensor (flexibles)
+    #[validate(length(min = 1))]
+    pub metrics: Vec<SensorMetric>,
+}
+
+/// Header con información del dispositivo
+#[derive(Debug, Deserialize, Serialize, Validate, Clone)]
+pub struct SensorHeader {
+    /// UUID del usuario (será reemplazado por el gateway)
+    #[serde(rename = "userUUID")]
+    pub user_uuid: Option<String>,
+
+    /// ID del dispositivo
     #[validate(length(min = 1, max = 50))]
-    pub sensor_id: String,
-    
-    /// Temperatura en grados Celsius
-    #[validate(range(min = -50.0, max = 100.0))]
-    pub temperature: f32,
-    
-    /// Humedad relativa en porcentaje (0-100)
-    #[validate(range(min = 0.0, max = 100.0))]
-    pub humidity: f32,
-    
-    /// Timestamp del sensor (opcional, si no se usa el del gateway)
-    pub timestamp: Option<DateTime<Utc>>,
-    
-    /// Nivel de batería del sensor (opcional)
-    #[validate(range(min = 0.0, max = 100.0))]
-    pub battery_level: Option<f32>,
-    
-    /// Intensidad de señal WiFi (RSSI)
-    pub rssi: Option<i32>,
+    #[serde(rename = "deviceId")]
+    pub device_id: String,
+
+    /// Ubicación del sensor
+    #[validate(length(min = 1, max = 200))]
+    pub location: String,
+
+    /// Topic del mensaje
+    pub topic: String,
+
+    /// Si debe reencolar el mensaje
+    #[serde(rename = "shouldRequeue")]
+    pub should_requeue: bool,
+}
+
+/// Métrica individual del sensor
+#[derive(Debug, Deserialize, Serialize, Validate, Clone)]
+pub struct SensorMetric {
+    /// Nombre de la medición (Temperature, Humidity, etc.)
+    #[validate(length(min = 1, max = 100))]
+    pub measurement: String,
+
+    /// Valor de la medición
+    pub value: f32,
 }
 
 /// Datos procesados y enriquecidos por el edge gateway
@@ -34,52 +56,43 @@ pub struct SensorDataInput {
 pub struct ProcessedSensorData {
     /// ID único de este registro
     pub id: Uuid,
-    
-    /// ID del sensor
-    pub sensor_id: String,
-    
-    /// Temperatura procesada
-    pub temperature: f32,
-    
-    /// Humedad procesada
-    pub humidity: f32,
-    
+
+    /// Header del sensor
+    pub header: SensorHeader,
+
+    /// Métricas originales
+    pub metrics: Vec<SensorMetric>,
+
     /// Timestamp de recepción en el gateway
     pub gateway_timestamp: DateTime<Utc>,
-    
-    /// Timestamp del sensor (si está disponible)
-    pub sensor_timestamp: Option<DateTime<Utc>>,
-    
+
     /// Datos calculados por edge computing
     pub computed: ComputedMetrics,
-    
+
     /// Estado de calidad de los datos
     pub quality: DataQuality,
-    
-    /// Metadatos del sensor
-    pub metadata: SensorMetadata,
+
+    /// Metadatos adicionales extraídos
+    pub metadata: ProcessedMetadata,
 }
 
 /// Métricas calculadas por edge computing
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ComputedMetrics {
-    /// Índice de calor (heat index) calculado
-    pub heat_index: f32,
-    
-    /// Punto de rocío (dew point)
-    pub dew_point: f32,
-    
-    /// Nivel de confort (0-100)
-    pub comfort_level: f32,
-    
+    /// Índice de calor (si hay temperatura y humedad)
+    pub heat_index: Option<f32>,
+
+    /// Punto de rocío (si hay temperatura y humedad)
+    pub dew_point: Option<f32>,
+
+    /// Nivel de confort (0-100) si aplica
+    pub comfort_level: Option<f32>,
+
     /// Anomalía detectada (basado en histórico local)
     pub is_anomaly: bool,
-    
-    /// Tendencia de temperatura (-1: bajando, 0: estable, 1: subiendo)
-    pub temperature_trend: i8,
-    
-    /// Tendencia de humedad
-    pub humidity_trend: i8,
+
+    /// Estadísticas adicionales calculadas
+    pub stats: HashMap<String, f32>,
 }
 
 /// Calidad de los datos recibidos
@@ -87,72 +100,97 @@ pub struct ComputedMetrics {
 pub struct DataQuality {
     /// Calidad general (0-100)
     pub score: u8,
-    
+
     /// Razones de baja calidad
     pub issues: Vec<String>,
-    
+
     /// Datos fueron corregidos/interpolados
     pub corrected: bool,
 }
 
-/// Metadatos del sensor
+/// Metadatos procesados
 #[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct SensorMetadata {
-    pub battery_level: Option<f32>,
-    pub rssi: Option<i32>,
-    pub firmware_version: Option<String>,
+pub struct ProcessedMetadata {
+    /// Número de métricas recibidas
+    pub metrics_count: usize,
+
+    /// Tipos de mediciones detectadas
+    pub measurement_types: Vec<String>,
+
+    /// Si el mensaje debe reencolar
+    pub should_requeue: bool,
 }
 
 /// Batch de múltiples lecturas
 #[derive(Debug, Deserialize, Validate)]
 pub struct SensorDataBatch {
-    #[validate(nested)]
     #[validate(length(min = 1, max = 100))]
+    #[validate(nested)]
     pub readings: Vec<SensorDataInput>,
 }
 
 /// Estadísticas agregadas para un sensor
 #[derive(Debug, Serialize)]
 pub struct SensorStatistics {
-    pub sensor_id: String,
+    pub device_id: String,
+    pub location: String,
     pub period_start: DateTime<Utc>,
     pub period_end: DateTime<Utc>,
     pub count: u32,
-    pub temperature: AggregatedMetric,
-    pub humidity: AggregatedMetric,
+    pub metrics_summary: HashMap<String, MetricSummary>,
 }
 
 #[derive(Debug, Serialize)]
-pub struct AggregatedMetric {
+pub struct MetricSummary {
+    pub measurement: String,
     pub min: f32,
     pub max: f32,
     pub avg: f32,
-    pub std_dev: f32,
+    pub count: u32,
 }
 
-/// Datos enviados al servicio cloud principal
+/// Datos enviados al servicio cloud principal via MQTT
 #[derive(Debug, Serialize, Clone)]
 pub struct CloudPayload {
-    /// ID del gateway edge
-    pub gateway_id: String,
-    
-    /// Versión del gateway
-    pub gateway_version: String,
-    
-    /// Datos procesados
-    pub data: Vec<ProcessedSensorData>,
-    
+    /// Header actualizado con información del gateway
+    pub header: CloudHeader,
+
+    /// Métricas originales más las computadas
+    pub metrics: Vec<SensorMetric>,
+
     /// Timestamp de envío
     pub sent_at: DateTime<Utc>,
-    
-    /// Estadísticas del batch
-    pub batch_stats: BatchStatistics,
+
+    /// Información de calidad
+    pub quality: DataQuality,
 }
 
+/// Header para enviar al cloud (con UUID del gateway)
 #[derive(Debug, Serialize, Clone)]
-pub struct BatchStatistics {
+pub struct CloudHeader {
+    #[serde(rename = "userUUID")]
+    pub user_uuid: String,
+
+    #[serde(rename = "deviceId")]
+    pub device_id: String,
+
+    pub location: String,
+
+    pub topic: String,
+
+    #[serde(rename = "shouldRequeue")]
+    pub should_requeue: bool,
+
+    /// ID del gateway que procesó
+    pub gateway_id: String,
+}
+
+/// Estadísticas de batch para cloud
+#[derive(Debug, Serialize, Clone)]
+pub struct CloudBatchStats {
     pub total_readings: u32,
     pub anomalies_detected: u32,
-    pub sensors_count: u32,
+    pub devices_count: u32,
     pub avg_quality_score: f32,
+    pub gateway_id: String,
 }

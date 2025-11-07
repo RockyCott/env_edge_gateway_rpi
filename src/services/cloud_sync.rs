@@ -1,30 +1,75 @@
 use crate::config::Config;
 use crate::database::Database;
-use crate::models::{BatchStatistics, CloudPayload};
+use crate::models::{CloudHeader, CloudPayload, SensorMetric};
 use chrono::Utc;
+use rumqttc::{AsyncClient, MqttOptions, QoS};
 use std::sync::Arc;
 use std::time::Duration;
 
-/// Servicio de sincronización con el cloud principal
+/// Servicio de sincronización con el cloud principal via MQTT
 /// Maneja el envío de datos procesados al servicio central
 pub struct CloudSync {
     config: Arc<Config>,
-    client: reqwest::Client,
+    mqtt_client: Option<AsyncClient>,
 }
 
 impl CloudSync {
     pub fn new(config: Arc<Config>) -> Self {
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(30))
-            .build()
-            .expect("Failed to create HTTP client");
-
-        Self { config, client }
+        Self {
+            config,
+            mqtt_client: None,
+        }
     }
 
-    /// Sincroniza datos pendientes con el cloud
-    pub async fn sync_data(&self, db: Database) -> anyhow::Result<()> {
-        tracing::info!("Iniciando sincronización con cloud");
+    /// Inicializa la conexión MQTT con el cloud
+    async fn init_mqtt_client(&mut self) -> anyhow::Result<AsyncClient> {
+        let mut mqttoptions = MqttOptions::new(
+            &self.config.cloud_mqtt_client_id,
+            &self.config.cloud_mqtt_broker_host,
+            self.config.cloud_mqtt_broker_port,
+        );
+
+        mqttoptions.set_keep_alive(Duration::from_secs(60));
+        mqttoptions.set_max_packet_size(2 * 1024 * 1024, 2 * 1024 * 1024); // 2MB
+
+        // Autenticación si está configurada
+        if let (Some(username), Some(password)) = (
+            &self.config.cloud_mqtt_username,
+            &self.config.cloud_mqtt_password,
+        ) {
+            mqttoptions.set_credentials(username, password);
+        }
+
+        let (client, mut eventloop) = AsyncClient::new(mqttoptions, 100);
+
+        tracing::info!(
+            broker = %self.config.cloud_mqtt_broker_host,
+            port = self.config.cloud_mqtt_broker_port,
+            "Conectando a broker MQTT del cloud"
+        );
+
+        // Iniciar eventloop en background
+        tokio::spawn(async move {
+            loop {
+                match eventloop.poll().await {
+                    Ok(_) => {}
+                    Err(e) => {
+                        tracing::error!("Error en MQTT eventloop del cloud: {}", e);
+                        tokio::time::sleep(Duration::from_secs(5)).await;
+                    }
+                }
+            }
+        });
+
+        // Pequeña espera para asegurar conexión
+        tokio::time::sleep(Duration::from_millis(500)).await;
+
+        Ok(client)
+    }
+
+    /// Sincroniza datos pendientes con el cloud via MQTT
+    pub async fn sync_data(&mut self, db: Database) -> anyhow::Result<()> {
+        tracing::info!("Iniciando sincronización con cloud via MQTT");
 
         // Obtener datos pendientes de sincronizar
         let pending_data = db
@@ -36,104 +81,145 @@ impl CloudSync {
             return Ok(());
         }
 
-        // Calcular estadísticas del batch
-        let stats = self.calculate_batch_stats(&pending_data);
+        // Asegurar cliente MQTT inicializado
+        if self.mqtt_client.is_none() {
+            self.mqtt_client = Some(self.init_mqtt_client().await?);
+        }
 
-        // Construir payload para el cloud
-        let payload = CloudPayload {
-            gateway_id: self.config.gateway_id.clone(),
-            gateway_version: env!("CARGO_PKG_VERSION").to_string(),
-            data: pending_data.clone(),
-            sent_at: Utc::now(),
-            batch_stats: stats,
-        };
+        let client = self.mqtt_client.as_ref().unwrap();
 
-        // Enviar al servicio cloud
-        match self.send_to_cloud(&payload).await {
-            Ok(_) => {
-                // Marcar como sincronizados
-                let ids: Vec<_> = pending_data.iter().map(|d| d.id).collect();
-                db.mark_as_synced(&ids).await?;
+        // Enviar cada dato procesado como mensaje individual
+        let mut sent_count = 0;
+        let mut failed_ids = Vec::new();
 
-                tracing::info!(
-                    count = pending_data.len(),
-                    "Datos sincronizados exitosamente"
-                );
+        for data in &pending_data {
+            match self.send_to_cloud_mqtt(client, data).await {
+                Ok(_) => {
+                    sent_count += 1;
+                }
+                Err(e) => {
+                    tracing::error!(
+                        id = %data.id,
+                        error = %e,
+                        "Error enviando dato al cloud"
+                    );
+                    failed_ids.push(data.id);
+                }
             }
-            Err(e) => {
-                tracing::error!(
-                    error = %e,
-                    "Error al sincronizar con cloud"
-                );
 
-                // Los datos quedan pendientes para reintentar después
-                return Err(e);
-            }
+            // Pequeño delay para no saturar el broker
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+
+        // Marcar como sincronizados solo los que se enviaron exitosamente
+        if sent_count > 0 {
+            let successful_ids: Vec<_> = pending_data
+                .iter()
+                .filter(|d| !failed_ids.contains(&d.id))
+                .map(|d| d.id)
+                .collect();
+
+            db.mark_as_synced(&successful_ids).await?;
+
+            tracing::info!(
+                sent = sent_count,
+                failed = failed_ids.len(),
+                "Sincronización completada via MQTT"
+            );
+        }
+
+        if !failed_ids.is_empty() {
+            anyhow::bail!("Falló el envío de {} mensajes", failed_ids.len());
         }
 
         Ok(())
     }
 
-    /// Envía datos al servicio cloud principal
-    async fn send_to_cloud(&self, payload: &CloudPayload) -> anyhow::Result<()> {
-        let response = self
-            .client
-            .post(&self.config.cloud_service_url)
-            .header("Content-Type", "application/json")
-            .header("X-Gateway-ID", &self.config.gateway_id)
-            .header(
-                "Authorization",
-                format!("Bearer {}", self.config.cloud_api_key),
+    /// Envía un dato procesado al cloud via MQTT
+    async fn send_to_cloud_mqtt(
+        &self,
+        client: &AsyncClient,
+        data: &crate::models::ProcessedSensorData,
+    ) -> anyhow::Result<()> {
+        // Construir header con UUID del usuario del gateway
+        let cloud_header = CloudHeader {
+            user_uuid: self.config.user_uuid.clone(),
+            device_id: data.header.device_id.clone(),
+            location: data.header.location.clone(),
+            topic: data.header.topic.clone(),
+            should_requeue: data.header.should_requeue,
+            gateway_id: self.config.gateway_id.clone(),
+        };
+
+        // Construir métricas incluyendo las computadas si existen
+        let mut all_metrics = data.metrics.clone();
+
+        // Agregar métricas computadas como métricas adicionales
+        if let Some(hi) = data.computed.heat_index {
+            all_metrics.push(SensorMetric {
+                measurement: "HeatIndex".to_string(),
+                value: hi,
+            });
+        }
+
+        if let Some(dp) = data.computed.dew_point {
+            all_metrics.push(SensorMetric {
+                measurement: "DewPoint".to_string(),
+                value: dp,
+            });
+        }
+
+        if let Some(cl) = data.computed.comfort_level {
+            all_metrics.push(SensorMetric {
+                measurement: "ComfortLevel".to_string(),
+                value: cl,
+            });
+        }
+
+        // Agregar quality score como métrica
+        all_metrics.push(SensorMetric {
+            measurement: "QualityScore".to_string(),
+            value: data.quality.score as f32,
+        });
+
+        // Construir payload
+        let payload = CloudPayload {
+            header: cloud_header,
+            metrics: all_metrics,
+            sent_at: Utc::now(),
+            quality: data.quality.clone(),
+        };
+
+        // Serializar a JSON
+        let payload_json = serde_json::to_string(&payload)?;
+
+        // Publicar en el topic del cloud
+        client
+            .publish(
+                &self.config.cloud_mqtt_topic,
+                QoS::AtLeastOnce,
+                false,
+                payload_json.as_bytes(),
             )
-            .json(payload)
-            .send()
             .await?;
 
-        if !response.status().is_success() {
-            let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            anyhow::bail!("Cloud service respondió con error {}: {}", status, body);
-        }
+        tracing::debug!(
+            device_id = %data.header.device_id,
+            topic = %self.config.cloud_mqtt_topic,
+            "Dato enviado al cloud via MQTT"
+        );
 
         Ok(())
-    }
-
-    /// Calcula estadísticas del batch para enviar al cloud
-    fn calculate_batch_stats(
-        &self,
-        data: &[crate::models::ProcessedSensorData],
-    ) -> BatchStatistics {
-        let total_readings = data.len() as u32;
-        let anomalies_detected = data.iter().filter(|d| d.computed.is_anomaly).count() as u32;
-
-        let unique_sensors: std::collections::HashSet<_> =
-            data.iter().map(|d| &d.sensor_id).collect();
-        let sensors_count = unique_sensors.len() as u32;
-
-        let total_quality: u32 = data.iter().map(|d| d.quality.score as u32).sum();
-        let avg_quality_score = if total_readings > 0 {
-            total_quality as f32 / total_readings as f32
-        } else {
-            0.0
-        };
-
-        BatchStatistics {
-            total_readings,
-            anomalies_detected,
-            sensors_count,
-            avg_quality_score,
-        }
     }
 
     /// Tarea periódica de sincronización
-    /// Sincroniza cada X segundos automáticamente
-    pub async fn start_sync_task(&self, db: Database) {
+    pub async fn start_sync_task(&mut self, db: Database) {
         let interval_secs = self.config.cloud_sync_interval_secs;
         let mut interval = tokio::time::interval(Duration::from_secs(interval_secs));
 
         tracing::info!(
             interval_secs = interval_secs,
-            "Tarea de sincronización periódica iniciada"
+            "Tarea de sincronización periódica iniciada (MQTT)"
         );
 
         loop {
@@ -146,8 +232,7 @@ impl CloudSync {
     }
 
     /// Intenta resincronizar datos que fallaron previamente
-    pub async fn retry_failed_syncs(&self, db: Database) -> anyhow::Result<()> {
-        // Implementar lógica de retry con exponential backoff
+    pub async fn retry_failed_syncs(&mut self, db: Database) -> anyhow::Result<()> {
         tracing::info!("Reintentando sincronizaciones fallidas");
         self.sync_data(db).await
     }

@@ -22,23 +22,23 @@ pub async fn ingest_sensor_data(
         .validate()
         .map_err(|e| AppError::ValidationError(e.to_string()))?;
 
-    tracing::info!(
-        sensor_id = %payload.sensor_id,
-        temperature = %payload.temperature,
-        humidity = %payload.humidity,
-        "📡 Recibiendo datos de sensor"
-    );
+    // tracing::info!(
+    //     sensor_id = %payload.sensor_id,
+    //     temperature = %payload.temperature,
+    //     humidity = %payload.humidity,
+    //     "📡 Recibiendo datos de sensor"
+    // );
 
     // Procesar datos con edge computing
     let processed = state.edge_processor.process_reading(payload).await;
 
     // Registrar anomalías detectadas
-    if processed.computed.is_anomaly {
-        tracing::warn!(
-            sensor_id = %processed.sensor_id,
-            "Anomalía detectada en lectura"
-        );
-    }
+    // if processed.computed.is_anomaly {
+    //     tracing::warn!(
+    //         sensor_id = %processed.sensor_id,
+    //         "Anomalía detectada en lectura"
+    //     );
+    // }
 
     // Almacenar en base de datos local
     state.db.insert_reading(&processed).await?;
@@ -55,7 +55,9 @@ pub async fn ingest_sensor_data(
         let cloud_sync = state.cloud_sync.clone();
         let db = state.db.clone();
         tokio::spawn(async move {
-            if let Err(e) = cloud_sync.sync_data(db).await {
+            let mut cs = cloud_sync.lock().await;
+
+            if let Err(e) = cs.sync_data(db).await {
                 tracing::error!("Error en sincronización: {}", e);
             }
         });
@@ -132,7 +134,8 @@ pub async fn ingest_batch_data(
         let cloud_sync = state.cloud_sync.clone();
         let db = state.db.clone();
         tokio::spawn(async move {
-            let _ = cloud_sync.sync_data(db).await;
+            let mut cs = cloud_sync.lock().await;
+            let _ = cs.sync_data(db).await;
         });
     }
 

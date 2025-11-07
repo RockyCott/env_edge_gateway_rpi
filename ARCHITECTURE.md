@@ -412,7 +412,7 @@ Structured logging con `tracing`:
 tracing::info!(
     sensor_id = %payload.sensor_id,
     temperature = %payload.temperature,
-    "📡 Recibiendo datos de sensor"
+    "Recibiendo datos de sensor"
 );
 ```
 

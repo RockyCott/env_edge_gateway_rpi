@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use tokio::net::TcpListener;
+use tokio::{net::TcpListener, sync::Mutex};
 use tracing::info;
 
 use crate::{
@@ -25,13 +25,14 @@ pub async fn bootstrap() -> anyhow::Result<()> {
 
     // Inicializar servicios
     let edge_processor = Arc::new(EdgeProcessor::new(config.clone()));
-    let cloud_sync = Arc::new(CloudSync::new(config.clone()));
+    let cloud_sync = Arc::new(Mutex::new(CloudSync::new(config.clone())));
 
     // Lanzar tareas en background
     let db_clone = db.clone();
     let cloud_sync_clone = cloud_sync.clone();
     tokio::spawn(async move {
-        cloud_sync_clone.start_sync_task(db_clone).await;
+        let mut cs = cloud_sync_clone.lock().await;
+        cs.start_sync_task(db_clone).await;
     });
 
     info!("Servicios de edge computing listos");
