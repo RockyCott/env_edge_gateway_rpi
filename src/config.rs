@@ -32,7 +32,7 @@ pub struct Config {
     pub mqtt_username: Option<String>,
     pub mqtt_password: Option<String>,
 
-    http_port: Option<u16>,
+    pub http_port: Option<u16>,
 }
 
 impl Config {
