@@ -107,8 +107,7 @@ async fn main() -> anyhow::Result<()> {
         .layer(TraceLayer::new_for_http());
 
     // Obtener dirección de bind
-    let http_port = 3000;
-    let addr = format!("{}:{}", "0.0.0.0", http_port);
+    let addr = format!("0.0.0.0:{}", config.http_port.unwrap_or(3000));
     let listener = tokio::net::TcpListener::bind(&addr).await?;
 
     tracing::info!("Servidor HTTP escuchando en {}", addr);
